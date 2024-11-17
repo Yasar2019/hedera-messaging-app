@@ -1,7 +1,13 @@
 import React, { useState, useEffect } from 'react';
+import './App.css';  // Add this line at the top of App.js
 import Web3 from 'web3';
-import { Client, TopicMessageSubmitTransaction } from '@hashgraph/sdk';
+import { Client, TopicMessageSubmitTransaction, TopicMessageQuery } from '@hashgraph/sdk';
 import { generateKey, readKey, readPrivateKey, encrypt, decrypt, createMessage, readMessage } from 'openpgp';
+import { BrowserProvider, Contract, keccak256, toUtf8Bytes } from 'ethers';
+
+
+//import contractABI from '../build/contracts/MessageLogger.json'; // Import the ABI of your deployed contract
+import MessageLoggerABI from './MessageLogger.json';
 
 function App() {
   const [account, setAccount] = useState(null);
@@ -10,17 +16,17 @@ function App() {
   const [decryptedMessage, setDecryptedMessage] = useState('');
   const [publicKeyArmored, setPublicKeyArmored] = useState('');
   const [privateKeyArmored, setPrivateKeyArmored] = useState('');
+  const [messages, setMessages] = useState([]); // State to store received messages
   
   // Your topic ID from Hedera
   const topicId = '0.0.4992822';  // Replace with your actual topic ID
+  const contractAddress = '0x00000000000000000000000000000000004c5748';
 
   // Connect MetaMask
   const connectWallet = async () => {
     if (window.ethereum) {
-      const web3 = new Web3(window.ethereum);
       try {
-        await window.ethereum.request({ method: 'eth_requestAccounts' });
-        const accounts = await web3.eth.getAccounts();
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
         setAccount(accounts[0]);
       } catch (error) {
         console.error('User denied account access');
@@ -30,6 +36,26 @@ function App() {
     }
   };
 
+  // Subscribe to the Hedera topic
+  const pollTopicMessages = async () => {
+    const client = Client.forTestnet();
+    client.setOperator(process.env.REACT_APP_HEDERA_ACCOUNT_ID, process.env.REACT_APP_HEDERA_PRIVATE_KEY);
+
+    try {
+      console.log("Polling Hedera topic for messages...");
+      new TopicMessageQuery()
+            .setTopicId(topicId)
+            .subscribe(client, (message) => {
+                const messageContent = Buffer.from(message.contents, "utf8").toString();
+                setMessages(prevMessages => [...prevMessages, messageContent]);
+            });
+
+      console.log("Messages received: ", messages);
+    } catch (error) {
+      console.error("Error polling Hedera topic:", error);
+    }
+  };
+  
   // Generate public and private keys for encryption
   const generateKeys = async () => {
     const { privateKey, publicKey } = await generateKey({
@@ -80,6 +106,34 @@ function App() {
     console.log(`Message submitted to Hedera: ${encryptedMessage}`);
   };
 
+  // Log message hash to the smart contract
+  const logMessageOnBlockchain = async () => {
+    if (!contractAddress || !account) return;
+    const provider = new BrowserProvider(window.ethereum);
+    const signer = provider.getSigner();
+    const contract = new Contract(contractAddress, MessageLoggerABI.abi, signer);
+
+    try {
+      const messageHash = keccak256(toUtf8Bytes(encryptedMessage));
+      const tx = await contract.logMessage(messageHash);
+      await tx.wait();
+      console.log('Message hash logged on blockchain:', messageHash);
+    } catch (error) {
+      console.error('Error logging message on blockchain:', error);
+    }
+  };
+
+  // Use polling in useEffect to fetch messages every few seconds
+  useEffect(() => {
+    if (account) {
+      const interval = setInterval(() => {
+        pollTopicMessages(); // Poll every 5 seconds
+      }, 5000);
+      return () => clearInterval(interval); // Clear interval on component unmount
+    }
+  }, [account]);
+
+
   useEffect(() => {
     generateKeys();
   }, []);
@@ -93,13 +147,14 @@ function App() {
             <p>Connected with {account}</p>
 
             <div>
-              <textarea 
-                placeholder="Type a message" 
-                value={message} 
+              <textarea
+                placeholder="Type a message"
+                value={message}
                 onChange={(e) => setMessage(e.target.value)}
               />
               <button onClick={() => encryptMessage(message)}>Encrypt Message</button>
               <button onClick={sendMessageToHedera}>Send Encrypted Message to Hedera</button>
+              <button onClick={logMessageOnBlockchain}>Log Message Hash on Blockchain</button>
             </div>
 
             {encryptedMessage && (
@@ -117,6 +172,19 @@ function App() {
               </div>
             )}
 
+            <div>
+              <h3>Received Messages:</h3>
+              <p>{JSON.stringify(messages)}</p> {/* Display the raw data to check state */}
+              {messages.length > 0 ? (
+                messages.map((msg, index) => (
+                  <div key={index}>
+                    <p>{msg}</p>
+                  </div>
+                ))
+              ) : (
+                <p>No messages yet</p> /* Display this if no messages are available */
+              )}
+            </div>
           </div>
         ) : (
           <button onClick={connectWallet}>Connect Wallet</button>
